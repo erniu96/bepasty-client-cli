@@ -10,7 +10,6 @@ from __future__ import print_function
 import base64
 import re
 import os
-import pwd
 import sys
 import errno
 import codecs
@@ -122,6 +121,7 @@ def setup_configuration(ctx, param, value):
 
 def shorten_homepath(homepath):
     try:
+        import pwd
         return homepath.replace(pwd.getpwuid(os.getuid()).pw_dir, '~', 1)
     except:
         return homepath
@@ -200,8 +200,8 @@ def main(token, filename, fname, url, ftype, list_pastes, insecure, lifetime, wr
         upload(token, filename, fname, url, ftype, insecure, lifetime)
 
 
-def _make_request(method, url, **kwargs):
-    func = getattr(requests, method)
+def _make_request(method, url, session=None, **kwargs):
+    func = getattr(session if session is not None else requests, method)
     try:
         if kwargs.get('verify', False):
             return func(url, **kwargs)
@@ -242,10 +242,9 @@ def upload(token, filename, fname, url, ftype, insecure, lifetime):
     """
     determine mime-type and upload to bepasty
     """
-    read_size = 1 * 1024 * 1024
     if filename:
-        fileobj = open(filename, 'rb')
         filesize = os.path.getsize(filename)
+        fileobj = open(filename, 'rb')
         if not fname:
             fname = os.path.basename(filename)
         stdin = False
@@ -254,12 +253,30 @@ def upload(token, filename, fname, url, ftype, insecure, lifetime):
         if not fname:
             fname = ''
         stdin = True
+        filesize = None
+
+    try:
+        _upload_chunks(token, fileobj, fname, url, ftype, insecure, lifetime,
+                       filesize, stdin)
+    finally:
+        if not stdin:
+            fileobj.close()
+
+
+def _upload_chunks(token, fileobj, fname, url, ftype, insecure, lifetime,
+                   filesize, stdin):
+    read_size = 1 * 1024 * 1024
 
     # we use the first chunk to determine the filetype if not set
     first_chunk = fileobj.read(read_size)
+    if not first_chunk:
+        raise click.ClickException(
+            'Cannot upload empty input: the REST API requires a non-empty byte range.')
     if not ftype:
         mime = magic.Magic(mime=True)
-        ftype = mime.from_buffer(first_chunk).decode()
+        ftype = mime.from_buffer(first_chunk)
+        if isinstance(ftype, bytes):
+            ftype = ftype.decode()
 
         if not ftype:
             ftype = 'text/plain'
@@ -271,60 +288,64 @@ def upload(token, filename, fname, url, ftype, insecure, lifetime):
 
     offset = 0
     trans_id = ''
-    while True:
-        if not offset:
-            raw_data = first_chunk
-        else:
-            raw_data = fileobj.read(read_size)
-        raw_data_size = len(raw_data)
+    raw_data = first_chunk
+    del first_chunk
+    # Reuse the connection across chunks, including TCP/TLS setup. Closing the
+    # session also releases pooled connections on errors and early returns.
+    with requests.Session() as session:
+        while raw_data:
+            raw_data_size = len(raw_data)
 
-        if not raw_data:
-            break  # EOF
-        if stdin:
-            if raw_data_size < read_size:
-                filesize = offset + raw_data_size
+            if stdin:
+                # EOF needs a lookahead even for a full chunk. Carry its single
+                # byte into the next chunk so stdin remains bounded in memory.
+                next_byte = fileobj.read(1)
+                filesize = offset + raw_data_size + (1 if next_byte else 0)
+
+            payload = base64.b64encode(raw_data)
+
+            headers = {
+                'Content-Range': 'bytes %d-%d/%d' % (offset, offset + raw_data_size - 1, filesize),
+                'Content-Type': ftype,
+                'Content-Filename': fname,
+                'Content-Length': str(len(payload)),  # rfc 2616 14.16
+                'Maxlife-Unit': lifetime[1],
+                'Maxlife-Value': str(lifetime[0]),
+            }
+            if trans_id != '':
+                headers['Transaction-ID'] = trans_id
+            response = _make_request(
+                'post',
+                '{}/apis/rest/items'.format(url),
+                session=session,
+                data=payload,
+                headers=headers,
+                auth=('user', token),
+                verify=not insecure
+            )
+            offset += raw_data_size
+            if response.status_code in (200, 201):
+                sys.stdout.write(
+                    '\r%dB (%d%%) uploaded of %dB total.' %
+                    (offset, offset * 100 / filesize, filesize))
+            if response.status_code == 200:
+                pass
+            elif response.status_code == 201:
+                loc = response.headers['Content-Location']
+                print('\nFile was successfully uploaded and can be found here:')
+                print('{}{}'.format(url, loc))
+                print('{}/{}'.format(url, loc.split('/')[-1]))
             else:
-                filesize = offset + raw_data_size + 1
+                raise click.ClickException('Upload failed: HTTP %d %s' %
+                                          (response.status_code, response.text))
 
-        payload = base64.b64encode(raw_data)
+            if response.headers['Transaction-ID']:
+                trans_id = response.headers['Transaction-ID']
 
-        headers = {
-            'Content-Range': 'bytes %d-%d/%d' % (offset, offset + raw_data_size - 1, filesize),
-            'Content-Type': ftype,
-            'Content-Filename': fname,
-            'Content-Length': str(len(payload)),  # rfc 2616 14.16
-            'Maxlife-Unit': lifetime[1],
-            'Maxlife-Value': str(lifetime[0]),
-        }
-        if trans_id != '':
-            headers['Transaction-ID'] = trans_id
-        response = _make_request(
-            'post',
-            '{}/apis/rest/items'.format(url),
-            data=payload,
-            headers=headers,
-            auth=('user', token),
-            verify=not insecure
-        )
-        offset += raw_data_size
-        if response.status_code in (200, 201):
-            sys.stdout.write(
-                '\r%dB (%d%%) uploaded of %dB total.' %
-                (offset, offset * 100 / filesize, filesize))
-        if response.status_code == 200:
-            pass
-        elif response.status_code == 201:
-            loc = response.headers['Content-Location']
-            print('\nFile was successfully uploaded and can be found here:')
-            print('{}{}'.format(url, loc))
-            print('{}/{}'.format(url, loc.split('/')[-1]))
-        else:
-            print('An error occurred: %d %s' %
-                  (response.status_code, response.text))
-            return
-
-        if response.headers['Transaction-ID']:
-            trans_id = response.headers['Transaction-ID']
+            if stdin:
+                raw_data = next_byte + fileobj.read(read_size - 1) if next_byte else b''
+            else:
+                raw_data = fileobj.read(read_size)
 
 
 if __name__ == '__main__':

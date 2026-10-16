@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Install requirements.txt first; PYTHON may select a virtualenv interpreter.
+set -euo pipefail
+ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+export PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}"
+if [[ $# == 0 ]]; then
+    set -- --help
+fi
+exec "${PYTHON:-python3}" -m bepasty_cli.cli "$@"
