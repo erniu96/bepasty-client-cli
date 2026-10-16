@@ -134,7 +134,7 @@ class UploadTest(unittest.TestCase):
         self.addCleanup(delattr, cli, 'open')
 
     def upload(self, url):
-        cli.upload('test-token', self.filename, 'test.bin', url,
+        cli.upload('test-token', self.filename, '测试 文件.bin', url,
                    'application/octet-stream', False, ('2', 'DAYS'))
 
     def test_chunks_share_one_connection_and_preserve_protocol(self):
@@ -161,7 +161,9 @@ class UploadTest(unittest.TestCase):
             self.assertEqual(second_headers['Transaction-ID'], 'test-transaction')
             for headers, chunk in server.chunks:
                 self.assertEqual(headers['Content-Type'], 'application/octet-stream')
-                self.assertEqual(headers['Content-Filename'], 'test.bin')
+                # http.server decodes header bytes as latin-1
+                self.assertEqual(headers['Content-Filename'].encode('latin-1').decode('utf-8'),
+                                 '测试 文件.bin')
                 self.assertEqual(headers['Content-Length'],
                                  str(len(base64.b64encode(chunk))))
                 self.assertEqual(headers['Maxlife-Value'], '2')

@@ -307,7 +307,8 @@ def _upload_chunks(token, fileobj, fname, url, ftype, insecure, lifetime,
             headers = {
                 'Content-Range': 'bytes %d-%d/%d' % (offset, offset + raw_data_size - 1, filesize),
                 'Content-Type': ftype,
-                'Content-Filename': fname,
+                # Raw UTF-8: http.client only encodes str headers as latin-1
+                'Content-Filename': fname.encode('utf-8'),
                 'Content-Length': str(len(payload)),  # rfc 2616 14.16
                 'Maxlife-Unit': lifetime[1],
                 'Maxlife-Value': str(lifetime[0]),
